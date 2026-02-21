@@ -23,7 +23,7 @@
 #   OPENBSD_SSH_PORT  Host port for SSH forward  (default: 7722)
 #
 # Prerequisites (Arch Linux):
-#   pacman -S qemu-full python socat curl
+#   pacman -S qemu-full python curl
 #
 # Port 80 access (one-time, needed for OpenBSD autoinstall discovery):
 #   sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
@@ -43,7 +43,7 @@ MEM="${OPENBSD_MEM:-4G}"
 DISK_SIZE="${OPENBSD_DISK:-20G}"
 SSH_KEY_FILE="${OPENBSD_SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"
 VM_USER="${OPENBSD_USER:-$(whoami)}"
-VM_HOSTNAME="${OPENBSD_HOSTNAME:-openbsd}"
+VM_HOSTNAME="${OPENBSD_HOSTNAME:-openbsd-builder.tesseras.local}"
 SSH_PORT="${OPENBSD_SSH_PORT:-7722}"
 
 VSHORT=$(echo "$VERSION" | tr -d '.')
@@ -91,9 +91,9 @@ if [ "$MODE" = "boot" ]; then
         exit 1
     fi
 
-    DISPLAY_OPTS="-nographic"
+    DISPLAY_OPTS="-nodefaults -serial mon:stdio -nographic"
     if [ "$DAEMON" = true ]; then
-        DISPLAY_OPTS="-display none -daemonize"
+        DISPLAY_OPTS="-nodefaults -serial null -display none -daemonize"
     fi
 
     echo "==> Booting OpenBSD ${VERSION} ($MEM RAM, $CPUS CPUs)"
@@ -105,19 +105,37 @@ if [ "$MODE" = "boot" ]; then
     # shellcheck disable=SC2086
     qemu-system-x86_64 \
         -enable-kvm \
+        -cpu host \
+        -machine q35,accel=kvm \
         -smp "cpus=${CPUS}" \
         -m "$MEM" \
-        -drive "file=${IMAGE},format=qcow2,if=virtio" \
-        -device e1000,netdev=net0 \
+        -mem-prealloc \
+        -boot c \
+        -drive "file=${IMAGE},format=qcow2,if=virtio,cache=unsafe,aio=io_uring" \
+        -device virtio-net-pci,netdev=net0 \
         -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22" \
         $DISPLAY_OPTS
+
+    if [ "$DAEMON" = true ]; then
+        echo "    Waiting for SSH..."
+        i=0
+        while [ "$i" -lt 60 ]; do
+            if ssh -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" "${VM_USER}@127.0.0.1" true 2>/dev/null; then
+                echo "    SSH ready!"
+                exit 0
+            fi
+            i=$((i + 1))
+            sleep 2
+        done
+        echo "    Warning: SSH not ready after 120s (VM may still be booting)"
+    fi
     exit 0
 fi
 
 # ── Install mode ─────────────────────────────────────────────────────────────
 
 # Check prerequisites
-for cmd in qemu-system-x86_64 qemu-img python3 socat curl; do
+for cmd in qemu-system-x86_64 qemu-img python3 curl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Error: $cmd not found. Install prerequisites first."
         exit 1
@@ -171,8 +189,7 @@ mkdir -p "$WORK_DIR/tftp/etc"
 # ── Download sets ────────────────────────────────────────────────────────────
 
 SETS="SHA256.sig bsd bsd.mp bsd.rd pxeboot"
-SETS="$SETS base${VSHORT}.tgz comp${VSHORT}.tgz man${VSHORT}.tgz game${VSHORT}.tgz"
-SETS="$SETS xbase${VSHORT}.tgz xfont${VSHORT}.tgz xserv${VSHORT}.tgz xshare${VSHORT}.tgz"
+SETS="$SETS base${VSHORT}.tgz comp${VSHORT}.tgz man${VSHORT}.tgz"
 SETS="$SETS BUILDINFO"
 
 echo "==> Downloading OpenBSD ${VERSION} sets..."
@@ -204,7 +221,7 @@ Location of sets = http
 HTTP Server = 10.0.2.2
 Unable to connect using https. Use http instead = yes
 URL to autopartitioning template for disklabel = http://10.0.2.2/disklabel
-Set name(s) = site${VSHORT}.tgz
+Set name(s) = -game${VSHORT}.tgz -xbase${VSHORT}.tgz -xfont${VSHORT}.tgz -xserv${VSHORT}.tgz -xshare${VSHORT}.tgz site${VSHORT}.tgz
 Checksum test for site${VSHORT}.tgz failed. Continue anyway = yes
 Unverified sets: site${VSHORT}.tgz. Continue without verification = yes
 Fetching of BUILDINFO failed. Continue anyway = yes
@@ -228,12 +245,27 @@ echo "${MIRROR}" > /etc/installurl
 # Enable SMT for better build performance
 echo "hw.smt=1" >> /etc/sysctl.conf
 
+# Enable ACPI power button shutdown (for QEMU system_powerdown)
+echo "machdep.pwraction=1" >> /etc/sysctl.conf
+
 # doas permission for ${VM_USER}
 echo "permit nopass keepenv ${VM_USER}" >> /etc/doas.conf
 
-# Install rust, rsync on first boot
+# Enable apmd for ACPI events, disable unnecessary daemons
+rcctl enable apmd
+rcctl disable sndiod
+rcctl disable smtpd
+rcctl disable slaacd
+rcctl disable cron
+rcctl disable pflogd
+rcctl disable syslogd
+rcctl disable ntpd
+rcctl disable resolvd
+
+# Install rust, rsync on first boot, then shutdown
 cat >> /etc/rc.firsttime << 'FIRSTTIME'
 pkg_add rust rsync--
+shutdown -p now
 FIRSTTIME
 SITEEOF
 chmod +x "$WORK_DIR/site/install.site"
@@ -279,16 +311,18 @@ fi
 
 echo "==> Installing OpenBSD ${VERSION}..."
 echo "    This takes ~5-10 minutes. The VM will reboot after install."
-echo "    On first boot, rc.firsttime installs rust/just/rsync (takes a few more minutes)."
-echo "    Press Ctrl-A X to exit QEMU when done."
+echo "    On first boot, rc.firsttime installs packages then shuts down the VM."
 echo ""
 
 qemu-system-x86_64 \
     -enable-kvm \
+    -cpu host \
+    -machine q35,accel=kvm \
     -smp "cpus=${CPUS}" \
     -m "$MEM" \
-    -drive "file=${IMAGE},media=disk,if=virtio" \
-    -device e1000,netdev=n1 \
+    -mem-prealloc \
+    -drive "file=${IMAGE},media=disk,if=virtio,cache=unsafe,aio=io_uring" \
+    -device virtio-net-pci,netdev=n1 \
     -netdev "user,id=n1,hostname=${VM_HOSTNAME},tftp=$WORK_DIR/tftp,bootfile=auto_install,hostfwd=tcp::${SSH_PORT}-:22" \
     -nographic
 
@@ -309,7 +343,7 @@ Host openbsd-builder
 	HostName 127.0.0.1
 	Port ${SSH_PORT}
 	User ${VM_USER}
-	IdentityFile ${SSH_KEY_FILE}
+	IdentityFile ${SSH_KEY_FILE%.pub}
 	StrictHostKeyChecking no
 	UserKnownHostsFile /dev/null
 	LogLevel ERROR
