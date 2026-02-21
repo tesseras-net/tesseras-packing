@@ -264,7 +264,7 @@ rcctl disable resolvd
 
 # Install rust, rsync on first boot, then shutdown
 cat >> /etc/rc.firsttime << 'FIRSTTIME'
-pkg_add rust rsync--
+pkg_add rust just rsync-- sqlite3
 shutdown -p now
 FIRSTTIME
 SITEEOF

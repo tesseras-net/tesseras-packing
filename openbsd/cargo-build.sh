@@ -126,7 +126,7 @@ rsync -az --delete \
 # ── Build ────────────────────────────────────────────────────────────────────
 
 echo "==> Running cargo build --profile ${PROFILE} ${EXTRA_CARGO_ARGS}..."
-ssh "$SSH_HOST" "cd $REMOTE_DIR && cargo build --profile $PROFILE $EXTRA_CARGO_ARGS"
+ssh "$SSH_HOST" "cd $REMOTE_DIR && LIBRARY_PATH=/usr/local/lib cargo build --profile $PROFILE $EXTRA_CARGO_ARGS"
 
 # ── Detect binary names ─────────────────────────────────────────────────────
 
