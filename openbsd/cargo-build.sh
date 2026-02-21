@@ -116,7 +116,7 @@ echo "==> Building ${PROJECT_NAME} on OpenBSD (${SSH_HOST}) [profile: ${PROFILE}
 
 echo "==> Syncing source to ${SSH_HOST}:${REMOTE_DIR}..."
 ssh "$SSH_HOST" "mkdir -p $REMOTE_DIR"
-rsync -az delete \
+rsync -az --delete \
     -e "ssh" \
     --exclude 'target/' \
     --exclude '.git/' \
